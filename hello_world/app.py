@@ -12,7 +12,7 @@ import zipfile
 import os
 import boto3
 from datetime import datetime
-from abc import abstractmethod
+from abc import abstractmethod, ABC
 from abc import ABCMeta
 
 
@@ -66,7 +66,39 @@ class LoanDocument(AssociatedDocument):
     folder: Mapped["LoanFolder"] = relationship()
 
 
-def getSession(event):
+class OpportunityFolder(Folder):
+    __tablename__ = "opportunity_folders"
+
+    opportunity_id = Column(mysql.BIGINT(20))
+    parent_id: Mapped[String] = mapped_column("opportunity_folder_id", ForeignKey("opportunity_folders.id"))
+    parent: Mapped["OpportunityFolder"] = relationship()
+
+
+class OpportunityDocument(AssociatedDocument):
+    __tablename__ = "opportunity_documents"
+
+    opportunity_id = Column(mysql.BIGINT(20))
+    folder_id: Mapped[String] = mapped_column("opportunity_folder_id", ForeignKey("opportunity_folders.id"))
+    folder: Mapped["OpportunityFolder"] = relationship()
+
+
+class ContactFolder(Folder):
+    __tablename__ = "person_folders"
+
+    contact_id = Column("person_id", mysql.BIGINT(20))
+    parent_id: Mapped[String] = mapped_column("person_folder_id", ForeignKey("person_folders.id"))
+    parent: Mapped["ContactFolder"] = relationship()
+
+
+class ContactDocument(AssociatedDocument):
+    __tablename__ = "person_documents"
+
+    contact_id = Column("person_id", mysql.BIGINT(20))
+    folder_id: Mapped[String] = mapped_column("person_folder_id", ForeignKey("person_folders.id"))
+    folder: Mapped["ContactFolder"] = relationship()
+
+
+def getSession():
     # engine = sqlalchemy.create_engine(
     #     url="mysql+pymysql://rbouser:Xc3113nc3@db-xcellence.cmcbmud1azxc.us-east-1.rds.amazonaws.com/mortgage",
     #     echo=True
@@ -79,10 +111,10 @@ def getSession(event):
         #     os.environ['db_name']
         # ),
         url="mysql+pymysql://{0}:{1}@{2}/{3}".format(
-            event['db_user'],
-            event['db_passwd'],
-            event['db_server'],
-            event['db_name']
+            os.environ['db_user'],
+            os.environ['db_passwd'],
+            os.environ['db_server'],
+            os.environ['db_name']
         ),
         echo=True
     )
@@ -139,16 +171,27 @@ def zipZipper(folder: FolderController, s3_client, aws_bucket_src, aws_bucket_ds
     s3_client.put_object(Bucket=aws_bucket_dst, Key=zip_name, Body=zip_buffer.getvalue())
 
 
-class RootLoanFolderController(FolderController):
-    def __init__(self, session, loan_id):
-        self.session = session
-        self.loan_id = loan_id
-
+class RootFolderController(FolderController, ABC):
     def getName(self) -> String:
         return ""
 
     def getParentName(self):
         return None
+
+    @abstractmethod
+    def getDocuments(self):
+        pass
+
+    @abstractmethod
+    def getChildFolders(self):
+        pass
+
+
+# loan controller
+class RootLoanFolderController(RootFolderController):
+    def __init__(self, session, loan_id):
+        self.session = session
+        self.loan_id = loan_id
 
     def getDocuments(self):
         return map(
@@ -201,53 +244,195 @@ class LoanFolderController(FolderController):
 
     def getChildFolders(self):
         return map(
-            lambda lf: LoanFolder(self.session, lf),
+            lambda lf: LoanFolderController(self.session, lf),
             self.session.query(LoanFolder).filter(
                 LoanFolder.parent_id == self.loan_folder.id
             )
         )
 
 
+# opportunity controller
+class RootOpportunityFolderController(RootFolderController):
+    def __init__(self, session, opportunity_id):
+        self.session = session
+        self.opportunity_id = opportunity_id
+
+    def getDocuments(self):
+        return map(
+            lambda ld: ld.document,
+            self.session.query(OpportunityDocument).filter(
+                and_(
+                    OpportunityDocument.opportunity_id == self.opportunity_id,
+                    OpportunityDocument.folder_id == None
+                )
+            )
+        )
+
+    def getChildFolders(self):
+        return map(
+            lambda lf: OpportunityFolderController(self.session, lf),
+            self.session.query(OpportunityFolder).filter(
+                and_(
+                    OpportunityFolder.opportunity_id == self.opportunity_id,
+                    OpportunityFolder.parent_id == None
+                )
+            )
+        )
+
+
+class OpportunityFolderController(FolderController):
+    # default constructor
+    def __init__(self, session, opportunity_folder):
+        self.session = session
+        if not isinstance(opportunity_folder, OpportunityFolder):
+            self.opportunity_folder = self.session.query(OpportunityFolder).filter(
+                OpportunityFolder.id == opportunity_folder
+            ).one()
+        else:
+            self.opportunity_folder = opportunity_folder
+
+    def getName(self) -> String:
+        return self.opportunity_folder.name
+
+    def getParentName(self):
+        if self.opportunity_folder.parent is not None:
+            return self.opportunity_folder.parent.name
+        else:
+            None
+
+    def getDocuments(self):
+        return map(
+            lambda ld: ld.document,
+            self.session.query(OpportunityDocument).filter(OpportunityDocument.folder_id == self.opportunity_folder.id)
+        )
+
+    def getChildFolders(self):
+        return map(
+            lambda lf: OpportunityFolderController(self.session, lf),
+            self.session.query(OpportunityFolder).filter(
+                OpportunityFolder.parent_id == self.opportunity_folder.id
+            )
+        )
+
+
+# contact controller
+class RootContactFolderController(RootFolderController):
+    def __init__(self, session, contact_id):
+        self.session = session
+        self.contact_id = contact_id
+
+    def getDocuments(self):
+        return map(
+            lambda ld: ld.document,
+            self.session.query(ContactDocument).filter(
+                and_(
+                    ContactDocument.contact_id == self.contact_id,
+                    ContactDocument.folder_id == None
+                )
+            )
+        )
+
+    def getChildFolders(self):
+        return map(
+            lambda lf: ContactFolderController(self.session, lf),
+            self.session.query(ContactFolder).filter(
+                and_(
+                    ContactFolder.contact_id == self.contact_id,
+                    ContactFolder.parent_id == None
+                )
+            )
+        )
+
+
+class ContactFolderController(FolderController):
+    # default constructor
+    def __init__(self, session, contact_folder):
+        self.session = session
+        if not isinstance(contact_folder, ContactFolder):
+            self.contact_folder = self.session.query(ContactFolder).filter(
+                ContactFolder.id == contact_folder
+            ).one()
+        else:
+            self.contact_folder = contact_folder
+
+    def getName(self) -> String:
+        return self.contact_folder.name
+
+    def getParentName(self):
+        if self.contact_folder.parent is not None:
+            return self.contact_folder.parent.name
+        else:
+            None
+
+    def getDocuments(self):
+        return map(
+            lambda ld: ld.document,
+            self.session.query(ContactDocument).filter(ContactDocument.folder_id == self.contact_folder.id)
+        )
+
+    def getChildFolders(self):
+        return map(
+            lambda lf: ContactFolderController(self.session, lf),
+            self.session.query(ContactFolder).filter(
+                ContactFolder.parent_id == self.contact_folder.id
+            )
+        )
+
+
 def lambda_handler(event, context):
-    """Sample pure Lambda function
+    session = getSession()
+    customer_id = event["customer_id"]
 
-    Parameters
-    ----------
-    event: dict, required
-        API Gateway Lambda Proxy Input Format
+    errors = []
+    types = ["loan", "opportunity", "contact"]
+    sub_types = ["folder", "root"]
 
-        Event doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html#api-gateway-simple-proxy-for-lambda-input-format
+    if event["type"] in types:
+        decorator_zip_name_type = event["type"].capitalize()
+    else:
+        errors.append("event[type] not in ({0})".format(", ".join(types)))
 
-    context: object, required
-        Lambda Context runtime methods and attributes
+    if event["sub_type"] in sub_types:
+        if event["sub_type"] == "folder":
+            func_folder_controller = '{0}FolderController'
+        elif event["sub_type"] == "root":
+            func_folder_controller = 'Root{0}FolderController'
+        func_folder_controller = func_folder_controller.format(decorator_zip_name_type)
+    else:
+        errors.append("event[sub_type] not in ({0})".format(", ".join(types)))
 
-        Context doc: https://docs.aws.amazon.com/lambda/latest/dg/python-context-object.html
+    folder = globals()[func_folder_controller](session, event['sub_type_id'])
+    if not isinstance(folder, RootFolderController):
+        decorator_zip_name_sub_type = "({0}) folder ({1})".format(
+            getattr(
+                getattr(
+                    folder,
+                    "{0}_folder".format(event["type"])
+                ),
+                "{0}_id".format(event["type"])
+            ),
+            folder.getName()
+        )
+    elif isinstance(folder, FolderController):
+        decorator_zip_name_sub_type = "({0}) root folder".format(event["sub_type_id"])
+    else:
+        errors.append("Class error name ({0})".format(func_folder_controller))
 
-    Returns
-    ------
-    API Gateway Lambda Proxy Output Format: dict
+    zip_name = "{0} {1} ({2}).zip".format(
+        decorator_zip_name_type,
+        decorator_zip_name_sub_type,
+        datetime.now()
+    )
 
-        Return doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html
-    """
-    session = getSession(event)
-    customer_id = event["customerId"]
-    if "loan_folder_id" in event:
-        folder = LoanFolderController(session, event["loan_folder_id"])
-        if isinstance(folder, FolderController):
-            zip_name = "{0}-{1}-{2}.zip".format(folder.getName(), event["loan_folder_id"], datetime.now())
-    elif "loan_id" in event:
-        folder = RootLoanFolderController(session, event["loan_id"])
-        if isinstance(folder, FolderController):
-            zip_name = "{0}-{1}.zip".format(event["loan_id"], datetime.now())
     s3_client = boto3.client('s3')
-    aws_bucket_src = "{0}".format(event['aws_bucket_src'])
-    aws_bucket_dst = "{0}".format(event['aws_bucket_dst'])
+    aws_bucket_src = "{0}".format(os.environ['aws_bucket_src'])
+    aws_bucket_dst = "{0}".format(os.environ['aws_bucket_dst'])
     zipZipper(folder, s3_client, aws_bucket_src, aws_bucket_dst, customer_id, zip_name)
 
     return {
         "statusCode": 200,
         "body": json.dumps({
-            "message": zip_name,
-            # "location": ip.text.replace("\n", "")
+            "zip_name": zip_name,
+            "errors": "\n".join(errors)
         }),
     }
