@@ -27,9 +27,19 @@ Base = declarative_base()
 
 class Document(Base):
     __tablename__ = "documents"
+
     id = Column(String, primary_key=True)
     name = Column(String)
     extension = Column(String)
+    working_document = relationship("WorkingDocument", uselist=False, back_populates="document")
+
+
+class WorkingDocument(Base):
+    __tablename__ = "working_documents"
+
+    id = Column(String, primary_key=True)
+    document_id: Mapped[String] = mapped_column(ForeignKey("documents.id"))
+    document: Mapped["Document"] = relationship(back_populates="working_document")
 
 
 class Folder(Base):
@@ -99,17 +109,8 @@ class ContactDocument(AssociatedDocument):
 
 
 def getSession():
-    # engine = sqlalchemy.create_engine(
-    #     url="mysql+pymysql://rbouser:Xc3113nc3@db-xcellence.cmcbmud1azxc.us-east-1.rds.amazonaws.com/mortgage",
-    #     echo=True
-    # )
+
     engine = sqlalchemy.create_engine(
-        # url="mysql+pymysql://{0}:{1}@{2}/{3}".format(
-        #     os.environ['db_user'],
-        #     os.environ['db_passwd'],
-        #     os.environ['db_server'],
-        #     os.environ['db_name']
-        # ),
         url="mysql+pymysql://{0}:{1}@{2}/{3}".format(
             os.environ['db_user'],
             os.environ['db_passwd'],
@@ -128,7 +129,11 @@ def zipFiles(aws_bucket_src, customer_id, logical_path, docs, s3_client, zipper)
         src_base_dir = "customer_{0}/documents/{1}/".format(customer_id, doc_id)
         src_file_name = "{0}.{1}".format(doc_id, doc.extension)
         dst_file_name = "{2}/{0}.{1}".format(doc.name, doc.extension, logical_path)
-        src_dir = src_base_dir + 'file/' + src_file_name
+        if doc.working_document is not None:
+            dst_key_file = 'signed/'
+        else:
+            dst_key_file = 'file/'
+        src_dir = src_base_dir + dst_key_file + src_file_name
         infile_object = s3_client.get_object(Bucket=aws_bucket_src, Key=src_dir)
         infile_content = infile_object['Body'].read()
         zipper.writestr(dst_file_name, infile_content)
@@ -425,6 +430,7 @@ def lambda_handler(event, context):
     )
 
     s3_client = boto3.client('s3')
+
     aws_bucket_src = "{0}".format(os.environ['aws_bucket_src'])
     aws_bucket_dst = "{0}".format(os.environ['aws_bucket_dst'])
     zipZipper(folder, s3_client, aws_bucket_src, aws_bucket_dst, customer_id, zip_name)
